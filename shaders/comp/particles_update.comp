@@ -1,0 +1,79 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = WARP_SIZE) in;
+
+// uniform
+layout(location = 0) uniform float uDeltaT;
+layout(location = 1) uniform vec3 uRandom;
+layout(location = 2) uniform int uFxId;
+
+// ssbo
+#include "shaders/ssbo/fx_presets.glsl"
+
+// global
+FxPreset fx = sFxPresets[uFxId];
+// gravity
+vec3 gAcceleration = fx.acceleration.xyz;
+float gParticleLifetime = fx.particle_lifetime;
+// rotation that rotates y axis to the direction of emitter
+mat3 gEmitterBasis = mat3(fx.emitter_basis);
+vec2 gStartPositionMinMax = fx.start_position_min_max;
+vec2 gStartVelocityMinMax = fx.start_velocity_min_max;
+vec3 gDirectionConstraints = fx.direction_constraints.xyz;
+float gConeAngle = fx.cone_angle_rad;
+uint gNumOfParticles = fx.num_of_particles;
+uint gBufferOffset = fx.buffer_offset;
+
+// constants
+const float kPI = 3.14159265359;
+
+vec3 RandomInitialVelocity() {
+  float theta = mix(0.0, gConeAngle, uRandom.x);
+  float phi = mix(0.0, 2.0 * kPI, uRandom.y);
+  float velocity =
+      mix(gStartVelocityMinMax.x, gStartVelocityMinMax.y, uRandom.z);
+  vec3 v = vec3(sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi));
+
+  return normalize(gEmitterBasis * v * gDirectionConstraints) * velocity;
+}
+
+vec3 RandomInitialPosition() {
+  float offset = mix(gStartPositionMinMax.x, gStartPositionMinMax.y, uRandom.y);
+  return vec3(offset, 0, 0);
+}
+
+void main() {
+  if (gl_GlobalInvocationID.x >= gNumOfParticles) return;
+  uint idx = gBufferOffset + gl_GlobalInvocationID.x;
+
+  vec3 in_position = sPositions[idx].xyz;
+  vec3 in_velocity = sVelocities[idx].xyz;
+  float in_age = sAges[idx];
+
+  if (in_age < 0.0 || in_age > gParticleLifetime) {
+    // particle is dead - recycle
+    sPositions[idx] = vec4(RandomInitialPosition(), 1.0);
+    sVelocities[idx] = vec4(RandomInitialVelocity(), 0.0);
+
+    if (in_age < 0.0) {
+      sAges[idx] = in_age + uDeltaT;
+    } else {
+      sAges[idx] = (in_age - gParticleLifetime) + uDeltaT;
+    }
+  } else {
+    // particle is alive - animate
+    sPositions[idx] = vec4(in_position + in_velocity * uDeltaT +
+                               0.5 * gAcceleration * uDeltaT * uDeltaT,
+                           1.0);
+    sVelocities[idx] = vec4(in_velocity + gAcceleration * uDeltaT, 0.0);
+    sAges[idx] = in_age + uDeltaT;
+  }
+}

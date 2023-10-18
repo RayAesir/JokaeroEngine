@@ -1,0 +1,75 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+layout(local_size_x = CLUSTER_THREADS_X, local_size_y = CLUSTER_THREADS_Y,
+       local_size_z = CLUSTER_THREADS_Z) in;
+
+// ubo
+#include "shaders/ubo/camera.glsl"
+#include "shaders/ubo/engine.glsl"
+#include "shaders/ubo/lighting.glsl"
+
+// ssbo
+#define STORAGE_FRUSTUM_CLUSTERS writeonly
+#include "shaders/ssbo/frustum_clusters.glsl"
+
+vec4 NdcToView(vec4 screen) {
+  vec4 view = uProjInverse * screen;
+  return view / view.w;
+}
+
+// https://www.humus.name/Articles/PracticalClusteredShading.pdf
+// http://www.aortiz.me/2018/12/21/CG.html
+// http://advances.realtimerendering.com/s2016/Siggraph2016_idTech6.pdf
+// https://ubm-twvideo01.s3.amazonaws.com/o1/vault/gdc2018/presentations/Marchalot_Ronan_ClusteredRenderingAnd.pdf
+// https://www.3dgep.com/wp-content/uploads/2017/07/3910539_Jeremiah_van_Oosten_Volume_Tiled_Forward_Shading.pdf
+
+// each thread handles one cluster
+void main() {
+  // gl_GlobalInvocationIndex
+  uint cluster_index =
+      gl_GlobalInvocationID.z * gl_WorkGroupSize.x * gl_WorkGroupSize.y +  //
+      gl_GlobalInvocationID.y * gl_WorkGroupSize.x +                       //
+      gl_GlobalInvocationID.x;
+
+  // screen space
+  uvec2 bottom_left_px = gl_GlobalInvocationID.xy * uClusterSizePx;
+  uvec2 top_right_px =
+      (gl_GlobalInvocationID.xy + uvec2(1, 1)) * uClusterSizePx;
+
+  // NDC [-1.0, 1.0]
+  vec2 bottom_left_ndc = vec2(bottom_left_px) * uInvScreenSize;
+  vec2 top_right_ndc = vec2(top_right_px) * uInvScreenSize;
+  bottom_left_ndc = 2.0 * bottom_left_ndc - 1.0;
+  top_right_ndc = 2.0 * top_right_ndc - 1.0;
+  // glClipControl [0.0, 1.0] with Reversed-Z, max z = 0.0
+  vec4 min_ndc = vec4(bottom_left_ndc, 0.0, 1.0);
+  vec4 max_ndc = vec4(top_right_ndc, 0.0, 1.0);
+
+  // view space
+  vec3 min_view = NdcToView(min_ndc).xyz;
+  vec3 max_view = NdcToView(max_ndc).xyz;
+
+  // near and far values of the cluster in view space
+  float cluster_near = uClusterDepthRange[gl_GlobalInvocationID.z][0];
+  float cluster_far = uClusterDepthRange[gl_GlobalInvocationID.z][1];
+
+  // intersection between a line from the camera's origin to the camera's far
+  // plane and the cluster's z-planes near/far
+  vec3 min_near = min_view * cluster_near / min_view.z;
+  vec3 min_far = min_view * cluster_far / min_view.z;
+  vec3 max_near = max_view * cluster_near / max_view.z;
+  vec3 max_far = max_view * cluster_far / max_view.z;
+
+  vec3 min_AABB = min(min(min_near, min_far), min(max_near, max_far));
+  vec3 max_AABB = max(max(min_near, min_far), max(max_near, max_far));
+
+  sClusterBox[cluster_index].min_point = vec4(min_AABB, 1.0);
+  sClusterBox[cluster_index].max_point = vec4(max_AABB, 1.0);
+}

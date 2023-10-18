@@ -1,0 +1,39 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = WARP_SIZE) in;
+
+// ubo
+#include "shaders/ubo/frustum_culling.glsl"
+
+// ssbo
+#define STORAGE_INSTANCES readonly
+#define STORAGE_VISIBILITY writeonly
+#include "shaders/ssbo/instances.glsl"
+#include "shaders/ssbo/visibility.glsl"
+
+const uint kStaticOpaque = 0;
+const uint kSkinnedOpaque = 1;
+const uint kStaticAlphaClip = 2;
+const uint kSkinnedAlphaClip = 3;
+const uint kStaticAlphaBlend = 4;
+const uint kSkinnedAlphaBlend = 5;
+
+void main() {
+  uint tid = gl_GlobalInvocationID.x;
+
+  if (tid < uSceneInstanceCount) {
+    uint mesh_type = UnpackMeshType(sInstances[tid].packed_cmd_index);
+    // reset visibility for Opaque and AlphaClip instances
+    if (mesh_type < kStaticAlphaBlend) {
+      sInstanceVisibility[tid] = 0;
+    }
+  }
+}

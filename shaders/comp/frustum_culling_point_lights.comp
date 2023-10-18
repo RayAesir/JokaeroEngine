@@ -1,0 +1,153 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// https://www.khronos.org/blog/vulkan-subgroup-tutorial
+// https://www.khronos.org/assets/uploads/developers/library/2018-vulkan-devday/06-subgroups.pdf
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_shuffle_relative : enable
+#extension GL_KHR_shader_subgroup_vote : enable
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = THREADS_PER_GROUP) in;
+
+// ubo
+#include "shaders/ubo/frustum_culling.glsl"
+
+// ssbo
+#define STORAGE_POINT_LIGHTS readonly
+#define STORAGE_ATOMIC_COUNTERS writeonly
+#define STORAGE_FRUSTUM_POINT_LIGHTS writeonly
+#include "shaders/ssbo/atomic_counters.glsl"
+#include "shaders/ssbo/frustum_point_lights.glsl"
+#include "shaders/ssbo/point_lights.glsl"
+
+// NVIDIA (512 / 32) = 16, AMD (512 / 64) = 8
+// WARP_SIZE for subgroup operations
+shared uint sPartialSum[WARP_SIZE];
+shared uint sFrustumLightsCounter;
+shared uint sFrustumShadowsCounter;
+
+bool TestPlaneSphere(vec3 sphere_center, float sphere_radius, vec4 plane) {
+  vec3 plane_normal = plane.xyz;
+  float plane_dist = plane.w;
+
+  float dist = dot(plane_normal, sphere_center) - plane_dist;
+  // intersection, early out
+  if (abs(dist) <= sphere_radius) return true;
+  return dist > sphere_radius ? true : false;
+}
+
+bool TestSphereFrustum(vec3 center, float radius) {
+  for (int i = 0; i < FRUSTUM_PLANES; ++i) {
+    vec4 plane = uFrustumPlanes[i];
+    if (TestPlaneSphere(center, radius, plane) == false) return false;
+  }
+  return true;
+}
+
+// stream compaction (lights+shadows) is faster than bitonic sorting ~2x
+void main() {
+  uint tid = gl_LocalInvocationIndex;
+  bool first_thread = tid == 0;
+  if (first_thread) {
+    sFrustumLightsCounter = 0;
+    sFrustumShadowsCounter = 0;
+  }
+  memoryBarrierShared();
+  barrier();
+
+  // scene lights offset to test spheres
+  uint scene_offset = 0;
+  // frustum lights offset to write culled lights
+  uint frustum_offset = 0;
+  while (scene_offset < uScenePointLightsCount) {
+    uint scene_id = scene_offset + tid;
+    uint visibility = 0;
+    uint shadowcaster = 0;
+    uint frustum_id = 0;
+
+    // e.g. 700 lights, two iterations, batch_size = [512, 188]
+    uint batch_size =
+        min(THREADS_PER_GROUP, uScenePointLightsCount - scene_offset);
+    if (tid < batch_size) {
+      PointLight light = sPointLights[scene_id];
+      if ((light.props & ENABLED) > 0) {
+        if (TestSphereFrustum(light.position.xyz, light.radius)) {
+          visibility = 1;
+          shadowcaster = light.props & CAST_SHADOWS;
+        }
+      }
+    }
+
+    // avoid deep nesting
+    if (shadowcaster > 0) {
+      uint shadow_offset = atomicAdd(sFrustumShadowsCounter, 1);
+      if (shadow_offset < MAX_POINT_SHADOWS) {
+        // shadow_offset is async, each frame produces the different order
+        // sorted later in the pipeline
+        sFrustumPointShadows[shadow_offset] = scene_id;
+      }
+    }
+    barrier();
+
+    // one atomic operation per subgroup (optimization)
+    uint subgroup_lights_count = subgroupAdd(visibility);
+    if (subgroupElect()) {
+      atomicAdd(sFrustumLightsCounter, subgroup_lights_count);
+    }
+
+    // predicates to scan, inclusive helps us to get correct partial sums
+    frustum_id = subgroupInclusiveAdd(visibility);
+
+    // the last thread in subgroup writes the biggest sum
+    if (gl_SubgroupInvocationID == gl_SubgroupSize - 1) {
+      sPartialSum[gl_SubgroupID] = frustum_id;
+    }
+    memoryBarrierShared();
+    barrier();
+
+    // the first subgroup (condition optimization)
+    bool first_subgroup = gl_SubgroupID == 0;
+    if (subgroupAll(first_subgroup)) {
+      // takes the subgroup sums [4, 2, 8, ..., gl_SubgroupSize]
+      uint warp_sum = sPartialSum[gl_SubgroupInvocationID];
+      warp_sum = subgroupExclusiveAdd(warp_sum);
+      // and calculates subgroup offsets in workgroup [0, 4, 6, 14, ...]
+      sPartialSum[gl_SubgroupInvocationID] = warp_sum;
+    }
+    memoryBarrierShared();
+    barrier();
+
+    // inclusive scan to exclusive
+    // shift [1, 1, 3, 4] -> [?, 1, 1, 3]
+    frustum_id = subgroupShuffleUp(frustum_id, 1);
+    // fix first index, subgroupElect() == (gl_SubgroupInvocationID == 0)
+    // when all invocations are active (no dynamic branching)
+    if (subgroupElect()) frustum_id = 0;
+
+    // other subgroups read the offsets
+    uint subgroup_offset = sPartialSum[gl_SubgroupID];
+    // and add them to get the final index
+    frustum_id = frustum_offset + subgroup_offset + frustum_id;
+
+    if (visibility == 1) {
+      sFrustumPointLights[frustum_id] = scene_id;
+    }
+
+    scene_offset += batch_size;
+    frustum_offset += sFrustumLightsCounter;
+  }
+
+  if (first_thread) {
+    sFrustumPointLightsCount = sFrustumLightsCounter;
+    sFrustumPointShadowsCount = (sFrustumShadowsCounter <= MAX_POINT_SHADOWS)
+                                    ? sFrustumShadowsCounter
+                                    : MAX_POINT_SHADOWS;
+  }
+}

@@ -1,0 +1,121 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = MAX_POINT_SHADOWS, local_size_y = CUBEMAP_FACES) in;
+
+// ubo
+#include "shaders/ubo/lighting.glsl"
+
+// ssbo
+#define STORAGE_POINT_LIGHTS readonly
+#define STORAGE_FRUSTUM_POINT_LIGHTS readonly
+#define STORAGE_FRUSTUM_POINT_SHADOWS writeonly
+#include "shaders/ssbo/frustum_point_lights.glsl"
+#include "shaders/ssbo/frustum_point_shadows.glsl"
+#include "shaders/ssbo/point_lights.glsl"
+
+// constants
+const vec3 kLookAtCenter[CUBEMAP_FACES] = vec3[](vec3(1.0, 0.0, 0.0),   // +X
+                                                 vec3(-1.0, 0.0, 0.0),  // -X
+                                                 vec3(0.0, 1.0, 0.0),   // +Y
+                                                 vec3(0.0, -1.0, 0.0),  // -Y
+                                                 vec3(0.0, 0.0, 1.0),   // +Z
+                                                 vec3(0.0, 0.0, -1.0)   // -Z
+);
+
+const vec3 kLookAtUp[CUBEMAP_FACES] =
+    vec3[](vec3(0.0, -1.0, 0.0),  // +X: [-Y, -Z]
+           vec3(0.0, -1.0, 0.0),  // -X: [-Y, +Z]
+           vec3(0.0, 0.0, 1.0),   // +Y: [+X, +Z]
+           vec3(0.0, 0.0, -1.0),  // -Y: [+X, -Z]
+           vec3(0.0, -1.0, 0.0),  // +Z: [+X, -Y]
+           vec3(0.0, -1.0, 0.0)   // -Z: [-X, -Y]
+    );
+
+const float kFovY = radians(90.0);
+const float kAspectRatio = 1.0;
+const float kNear = 0.05;
+
+mat4 LookAt(vec3 eye, vec3 center, vec3 up) {
+  const vec3 f = normalize(center - eye);
+  const vec3 s = normalize(cross(f, up));
+  const vec3 u = cross(s, f);
+
+  mat4 result = mat4(1.0);
+  result[0][0] = s.x;
+  result[1][0] = s.y;
+  result[2][0] = s.z;
+  result[0][1] = u.x;
+  result[1][1] = u.y;
+  result[2][1] = u.z;
+  result[0][2] = -f.x;
+  result[1][2] = -f.y;
+  result[2][2] = -f.z;
+  result[3][0] = -dot(s, eye);
+  result[3][1] = -dot(u, eye);
+  result[3][2] = dot(f, eye);
+  return result;
+}
+
+mat4 PerspectiveZeroOne(float fov_y, float aspect, float z_near, float z_far) {
+  const float tan_half_fov_y = tan(fov_y / 2.0);
+
+  mat4 result = mat4(0.0);
+  result[0][0] = 1.0 / (aspect * tan_half_fov_y);
+  result[1][1] = 1.0 / (tan_half_fov_y);
+  result[2][2] = z_far / (z_near - z_far);
+  result[2][3] = -1.0;
+  result[3][2] = -(z_far * z_near) / (z_far - z_near);
+  return result;
+}
+
+// Gribb/Hartmann method
+void GetFrustum(mat4 mat, uint layer_index) {
+  vec4 row_x = vec4(mat[0][0], mat[1][0], mat[2][0], mat[3][0]);
+  vec4 row_y = vec4(mat[0][1], mat[1][1], mat[2][1], mat[3][1]);
+  vec4 row_z = vec4(mat[0][2], mat[1][2], mat[2][2], mat[3][2]);
+  vec4 row_w = vec4(mat[0][3], mat[1][3], mat[2][3], mat[3][3]);
+  vec4 planes[FRUSTUM_PLANES];
+  planes[0] = row_w + row_x;
+  planes[1] = row_w - row_x;
+  planes[2] = row_w + row_y;
+  planes[3] = row_w - row_y;
+  planes[4] = row_w + row_z;
+  planes[5] = row_w - row_z;
+  // normalizing the planes
+  for (uint p = 0; p < FRUSTUM_PLANES; ++p) {
+    planes[p] = planes[p] / length(vec3(planes[p]));
+    sFrustumPointShadowsLayerFrustum[layer_index][p] =
+        vec4(vec3(planes[p]), -planes[p].w);
+  }
+}
+
+void main() {
+  uint shadow_index = gl_LocalInvocationID.x;
+  uint cubemap_face = gl_LocalInvocationID.y;
+  uint layer_index = shadow_index * CUBEMAP_FACES + cubemap_face;
+
+  if (shadow_index < uPointShadowsTotal) {
+    uint light_index = sFrustumPointShadows[shadow_index];
+    PointLight light = sPointLights[light_index];
+
+    mat4 light_proj =
+        PerspectiveZeroOne(kFovY, kAspectRatio, kNear, light.radius);
+    mat4 light_view = LookAt(light.position.xyz,
+                             light.position.xyz + kLookAtCenter[cubemap_face],
+                             kLookAtUp[cubemap_face]);
+
+    mat4 shadow_space = light_proj * light_view;
+    sFrustumPointShadowsProjView[layer_index] = shadow_space;
+    sFrustumPointShadowsPosInvRad2[shadow_index] =
+        vec4(light.position.xyz, light.inv_radius2);
+    GetFrustum(shadow_space, layer_index);
+  }
+}

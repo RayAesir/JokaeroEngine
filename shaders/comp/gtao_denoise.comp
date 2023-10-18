@@ -1,0 +1,182 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+// OpenGL adaptation of https://github.com/GameTechDev/XeGTAO
+#define GTAO_GROUP_SIZE 8
+layout(local_size_x = GTAO_GROUP_SIZE, local_size_y = GTAO_GROUP_SIZE) in;
+
+// ubo
+#include "shaders/ubo/camera.glsl"
+#include "shaders/ubo/engine.glsl"
+#include "shaders/ubo/gtao.glsl"
+
+// uniform
+layout(location = 0) uniform bool uFinalApply;
+
+// textures
+layout(binding = 0) uniform usampler2D texNormalsVisibility;
+layout(binding = 1) uniform sampler2D texEdges;
+
+// images
+layout(r32ui, binding = 0) uniform writeonly uimage2D imgOutput;
+
+// for packing in UNORM
+// (because raw, pre-denoised occlusion term can overshoot 1
+// but will later average out to 1)
+#define OCCLUSION_TERM_SCALE 1.5
+
+vec4 UnpackEdges(float input_value) {
+  uint packed_val = uint(input_value * 255.5);
+  vec4 edges;
+  // there's really no need for mask (as it's an 8 bit input) but I'll
+  // leave it in so it doesn't cause any trouble in the future
+  edges.x = float((packed_val >> 6) & 0x03) / 3.0;
+  edges.y = float((packed_val >> 4) & 0x03) / 3.0;
+  edges.z = float((packed_val >> 2) & 0x03) / 3.0;
+  edges.w = float((packed_val >> 0) & 0x03) / 3.0;
+  return clamp(edges, 0.0, 1.0);
+}
+
+void AddSample(vec4 ssao_value, float edge_value, inout vec4 sum,
+               inout float sum_weight) {
+  float weight = edge_value;
+
+  sum += (weight * ssao_value);
+  sum_weight += weight;
+}
+
+void DecodeGatherPartial(const uvec4 packed_value, out vec4 out_decoded[4]) {
+  for (int i = 0; i < 4; i++) {
+    vec4 decoded = unpackUnorm4x8(packed_value[i]);
+    vec3 bent_normal = decoded.xyz * 2.0 - 1.0;
+    float visibility = decoded.w;
+    out_decoded[i] = vec4(bent_normal, visibility);
+  }
+}
+
+void Output(ivec2 pix_coords, vec4 output_value) {
+  float visibility =
+      output_value.w * ((uFinalApply) ? (OCCLUSION_TERM_SCALE) : (1.0));
+  vec3 bent_normal = normalize(output_value.xyz);
+  vec4 unpacked = vec4(bent_normal * 0.5 + 0.5, visibility);
+  imageStore(imgOutput, pix_coords, uvec4(packUnorm4x8(unpacked), 0, 0, 0));
+}
+
+void main() {
+  // we're computing 2 horizontal pixels at a time (performance optimization)
+  uvec2 pix_coord_base = gl_GlobalInvocationID.xy * uvec2(2, 1);
+
+  const float blur_amount =
+      (uFinalApply) ? (uDenoiseBlurBeta) : (uDenoiseBlurBeta / 5.0);
+  const float diag_weight = 0.85 * 0.5;
+
+  // pixel pix_coord_base and pixel pix_coord_base + ivec2( 1, 0 )
+  vec4 ao_term[2];
+  vec4 edges_c[2];  // LRTB
+  float weight_tl[2];
+  float weight_tr[2];
+  float weight_bl[2];
+  float weight_br[2];
+
+  // gather edge and visibility quads, used later
+  const int kRedChannel = 0;
+  const vec2 gather_center =
+      vec2(pix_coord_base.x, pix_coord_base.y) * uInvScreenSize;
+  vec4 edges_q0 = textureGather(texEdges, gather_center, kRedChannel);
+  vec4 edges_q1 =
+      textureGatherOffset(texEdges, gather_center, ivec2(2, 0), kRedChannel);
+  vec4 edges_q2 =
+      textureGatherOffset(texEdges, gather_center, ivec2(1, 2), kRedChannel);
+
+  vec4 vis_q0[4];
+  uvec4 packed_q0 =
+      textureGather(texNormalsVisibility, gather_center, kRedChannel);
+  DecodeGatherPartial(packed_q0, vis_q0);
+
+  vec4 vis_q1[4];
+  uvec4 packed_q1 = textureGatherOffset(texNormalsVisibility, gather_center,
+                                        ivec2(2, 0), kRedChannel);
+  DecodeGatherPartial(packed_q1, vis_q1);
+
+  vec4 vis_q2[4];
+  uvec4 packed_q2 = textureGatherOffset(texNormalsVisibility, gather_center,
+                                        ivec2(0, 2), kRedChannel);
+  DecodeGatherPartial(packed_q2, vis_q2);
+
+  vec4 vis_q3[4];
+  uvec4 packed_q3 = textureGatherOffset(texNormalsVisibility, gather_center,
+                                        ivec2(2, 2), kRedChannel);
+  DecodeGatherPartial(packed_q3, vis_q3);
+
+  for (int side = 0; side < 2; side++) {
+    const ivec2 pix_coords = ivec2(pix_coord_base.x + side, pix_coord_base.y);
+
+    vec4 edges_l = UnpackEdges((side == 0) ? (edges_q0.x) : (edges_q0.y));
+    vec4 edges_t = UnpackEdges((side == 0) ? (edges_q0.z) : (edges_q1.w));
+    vec4 edges_r = UnpackEdges((side == 0) ? (edges_q1.x) : (edges_q1.y));
+    vec4 edges_b = UnpackEdges((side == 0) ? (edges_q2.w) : (edges_q2.z));
+
+    edges_c[side] = UnpackEdges((side == 0) ? (edges_q0.y) : (edges_q1.x));
+
+    // Edges aren't perfectly symmetrical: edge detection algorithm does not
+    // guarantee that a left edge on the right pixel will match the right edge
+    // on the left pixel (although they will match in majority of cases). This
+    // line further enforces the symmetricity, creating a slightly sharper blur.
+    // Works real nice with TAA.
+    edges_c[side] *= vec4(edges_l.y, edges_r.x, edges_t.w, edges_b.z);
+
+    // this allows some small amount of AO leaking from neighbours if there
+    // are 3 or 4 edges; this reduces both spatial and temporal aliasing
+    const float leak_threshold = 2.5;
+    const float leak_strength = 0.5;
+    float edginess =
+        (clamp(4.0 - leak_threshold - dot(edges_c[side], vec4(1.0)), 0.0, 1.0) /
+         (4.0 - leak_threshold)) *
+        leak_strength;
+    edges_c[side] = clamp(edges_c[side] + edginess, 0.0, 1.0);
+
+    // for diagonals; used by first and second pass
+    weight_tl[side] = diag_weight * (edges_c[side].x * edges_l.z +
+                                     edges_c[side].z * edges_t.x);
+    weight_tr[side] = diag_weight * (edges_c[side].z * edges_t.y +
+                                     edges_c[side].y * edges_r.z);
+    weight_bl[side] = diag_weight * (edges_c[side].w * edges_b.x +
+                                     edges_c[side].x * edges_l.w);
+    weight_br[side] = diag_weight * (edges_c[side].y * edges_r.w +
+                                     edges_c[side].w * edges_b.y);
+
+    // first pass
+    vec4 ssao = (side == 0) ? (vis_q0[1]) : (vis_q1[0]);
+    vec4 ssao_l = (side == 0) ? (vis_q0[0]) : (vis_q0[1]);
+    vec4 ssao_t = (side == 0) ? (vis_q0[2]) : (vis_q1[3]);
+    vec4 ssao_r = (side == 0) ? (vis_q1[0]) : (vis_q1[1]);
+    vec4 ssao_b = (side == 0) ? (vis_q2[2]) : (vis_q3[3]);
+    vec4 ssao_tl = (side == 0) ? (vis_q0[3]) : (vis_q0[2]);
+    vec4 ssao_br = (side == 0) ? (vis_q3[3]) : (vis_q3[2]);
+    vec4 ssao_tr = (side == 0) ? (vis_q1[3]) : (vis_q1[2]);
+    vec4 ssao_bl = (side == 0) ? (vis_q2[3]) : (vis_q2[2]);
+
+    float sum_weight = blur_amount;
+    vec4 sum = ssao * sum_weight;
+
+    AddSample(ssao_l, edges_c[side].x, sum, sum_weight);
+    AddSample(ssao_r, edges_c[side].y, sum, sum_weight);
+    AddSample(ssao_t, edges_c[side].z, sum, sum_weight);
+    AddSample(ssao_b, edges_c[side].w, sum, sum_weight);
+
+    AddSample(ssao_tl, weight_tl[side], sum, sum_weight);
+    AddSample(ssao_tr, weight_tr[side], sum, sum_weight);
+    AddSample(ssao_bl, weight_bl[side], sum, sum_weight);
+    AddSample(ssao_br, weight_br[side], sum, sum_weight);
+
+    ao_term[side] = sum / sum_weight;
+
+    Output(pix_coords, ao_term[side]);
+  }
+}

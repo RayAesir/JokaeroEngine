@@ -1,0 +1,76 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = MAX_POINT_SHADOWS) in;
+
+// ubo
+#include "shaders/ubo/lighting.glsl"
+
+// ssbo
+#define STORAGE_FRUSTUM_POINT_LIGHTS
+#include "shaders/ssbo/frustum_point_lights.glsl"
+
+// shared
+shared uint sValues[MAX_POINT_SHADOWS];
+
+void BitonicSort(uint j, uint k) {
+  uint i = gl_LocalInvocationIndex;
+  uint ixj = i ^ j;
+
+  // the threads with the lowest ids sort the array
+  if (ixj > i) {
+    if ((i & k) == 0) {
+      // sort ascending
+      if (sValues[i] > sValues[ixj]) {
+        uint temp = sValues[i];
+        sValues[i] = sValues[ixj];
+        sValues[ixj] = temp;
+      }
+    }
+    if ((i & k) != 0) {
+      // sort descending
+      if (sValues[i] < sValues[ixj]) {
+        uint temp = sValues[i];
+        sValues[i] = sValues[ixj];
+        sValues[ixj] = temp;
+      }
+    }
+  }
+  memoryBarrierShared();
+  barrier();
+}
+
+void main() {
+  uint tid = gl_LocalInvocationIndex;
+  bool in_range = tid < uPointShadowsTotal;
+
+  // ascending order, put uint max
+  sValues[tid] = in_range ? sFrustumPointShadows[tid] : 0xFFFFFFFF;
+  memoryBarrierShared();
+  barrier();
+
+  // major step, 2 ^ step
+  // e.g. [[2], [4, 4], [8, 8, 8], [16, 16, 16, 16], [32, 32, 32, 32, 32]]
+  for (uint k = 2; k <= MAX_POINT_SHADOWS; k <<= 1) {
+    // minor step, (current thread ^ mask)
+    // e.g. [[1], [2, 1], [4, 2, 1], [8, 4, 2, 1], [16, 8, 4, 2, 1]]
+    for (uint j = k >> 1; j > 0; j = j >> 1) {
+      BitonicSort(j, k);
+    }
+  }
+
+  if (in_range) {
+    uint light_id = sValues[tid];
+    // write sorted indices to create shadowmap
+    sFrustumPointShadows[tid] = light_id;
+    // shadowmap access in the fragment shaders
+    sPointLightsShadowIndex[light_id] = float(gl_LocalInvocationIndex);
+  }
+}

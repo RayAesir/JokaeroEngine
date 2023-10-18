@@ -1,0 +1,111 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = WARP_SIZE) in;
+
+// ubo
+#include "shaders/ubo/camera.glsl"
+#include "shaders/ubo/frustum_culling.glsl"
+#include "shaders/ubo/shadows.glsl"
+
+// ssbo
+#define STORAGE_ATOMIC_COUNTERS
+#define INDIRECT_CMD_DRAW readonly
+#define STORAGE_INSTANCES readonly
+#define STORAGE_MATRICES readonly
+#define STORAGE_FRUSTUM_POINT_SHADOWS readonly
+#define STORAGE_VISIBILITY readonly
+#define INSTANCE_DATA writeonly
+#define INSTANCE_MATRIX_MVP writeonly
+#include "shaders/ssbo/atomic_counters.glsl"
+#include "shaders/ssbo/frustum_point_shadows.glsl"
+#include "shaders/ssbo/indirect_cmd_draw.glsl"
+#include "shaders/ssbo/instance_data.glsl"
+#include "shaders/ssbo/instance_matrix_mvp.glsl"
+#include "shaders/ssbo/instances.glsl"
+#include "shaders/ssbo/matrices.glsl"
+#include "shaders/ssbo/visibility.glsl"
+
+void main() {
+  uint tid = gl_GlobalInvocationID.x;
+
+#ifdef POINT_SHADOWS
+  uint visibility = sPointShadowsCountOffset[tid].x;
+#else
+  uint visibility = sInstanceVisibility[tid];
+#endif
+
+  if (0 < visibility) {
+    Instance instance = sInstances[tid];
+    uint cmd_index = UnpackCmdIndex(instance.packed_cmd_index);
+    uint base_instance = sDrawCmd[cmd_index].base_instance;
+
+#ifdef DIRECT_SHADOWS
+
+    // each bit is index of cascade layer
+    // the only way to get index is to iterate over bits
+    // compile time constant, loop should be unrolled
+    uint shadow_count = 0;
+    uint shadow_indices[MAX_CASCADES];
+    for (uint i = 0; i < MAX_CASCADES; ++i) {
+      shadow_indices[shadow_count] = i;
+      shadow_count += ((visibility >> i) & 1);
+    }
+
+    uint instance_id = atomicAdd(sCmdInstanceCount[cmd_index], shadow_count);
+    uint global_index = base_instance + instance_id;
+    for (uint i = 0; i < shadow_count; ++i) {
+      uint shadow_index = shadow_indices[i];
+      sInstanceData[global_index + i] = uvec4(instance.matrix_index,     //
+                                              instance.material_index,   //
+                                              instance.animation_index,  //
+                                              shadow_index               //
+      );
+
+      // optimization
+      sMVP[global_index + i] =
+          uShadowSpace[shadow_index] * sWorld[instance.matrix_index];
+    }
+
+#endif
+
+#ifdef POINT_SHADOWS
+
+    uint shadow_count = visibility;
+    uint offset = sPointShadowsCountOffset[tid].y;
+
+    uint instance_id = atomicAdd(sCmdInstanceCount[cmd_index], shadow_count);
+    uint global_index = base_instance + instance_id;
+    for (uint i = 0; i < shadow_count; ++i) {
+      uint layer_index = sInstanceVisibility[offset + i];
+      sInstanceData[global_index + i] = uvec4(instance.matrix_index,     //
+                                              instance.material_index,   //
+                                              instance.animation_index,  //
+                                              layer_index                //
+      );
+    }
+
+#endif
+
+#ifdef VIEW
+
+    uint instance_id = atomicAdd(sCmdInstanceCount[cmd_index], 1);
+    uint global_index = base_instance + instance_id;
+    sInstanceData[global_index] = uvec4(instance.matrix_index,     //
+                                        instance.material_index,   //
+                                        instance.animation_index,  //
+                                        tid                        //
+    );
+
+    sMVP[global_index] = uProjView * sWorld[instance.matrix_index];
+
+#endif
+  }
+}

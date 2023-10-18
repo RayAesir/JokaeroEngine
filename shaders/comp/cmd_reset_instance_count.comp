@@ -1,0 +1,22 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = WARP_SIZE) in;
+
+// ssbo
+#define INDIRECT_CMD_DRAW writeonly
+#include "shaders/ssbo/indirect_cmd_draw.glsl"
+
+void main() {
+  uint tid = gl_GlobalInvocationID.x;
+  // reset counters
+  sDrawCmd[tid].instance_count = 0;
+  sDrawCmd[tid].base_instance = 0;
+}

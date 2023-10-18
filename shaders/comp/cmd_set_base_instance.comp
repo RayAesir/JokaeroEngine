@@ -1,0 +1,67 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// https://www.khronos.org/blog/vulkan-subgroup-tutorial
+// https://www.khronos.org/assets/uploads/developers/library/2018-vulkan-devday/06-subgroups.pdf
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_shuffle_relative : enable
+#extension GL_KHR_shader_subgroup_vote : enable
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = THREADS_PER_GROUP) in;
+
+// ubo
+#include "shaders/ubo/frustum_culling.glsl"
+
+// ssbo
+#define INDIRECT_CMD_DRAW
+#include "shaders/ssbo/indirect_cmd_draw.glsl"
+
+shared uint sPartialSum[WARP_SIZE];
+
+void main() {
+  uint pass_offset = 0;
+  while (pass_offset < uSceneMeshCount) {
+    uint mesh_id = pass_offset + gl_LocalInvocationIndex;
+    uint batch_size = min(THREADS_PER_GROUP, uSceneMeshCount - pass_offset);
+
+    // thread sums
+    uint base = sDrawCmd[mesh_id].instance_count;
+    base = subgroupInclusiveAdd(base);
+
+    // subgroup sums
+    if (gl_SubgroupInvocationID == gl_SubgroupSize - 1) {
+      sPartialSum[gl_SubgroupID] = base;
+    }
+    memoryBarrierShared();
+    barrier();
+
+    // subgroup offsets
+    bool first_subgroup = gl_SubgroupID == 0;
+    if (subgroupAll(first_subgroup)) {
+      uint warp_sum = sPartialSum[gl_SubgroupInvocationID];
+      warp_sum = subgroupExclusiveAdd(warp_sum);
+      sPartialSum[gl_SubgroupInvocationID] = warp_sum;
+    }
+    memoryBarrierShared();
+    barrier();
+
+    // inclusive to exclusive
+    base = subgroupShuffleUp(base, 1);
+    if (subgroupElect()) base = 0;
+
+    // final value
+    uint subgroup_offset = sPartialSum[gl_SubgroupID];
+    base = pass_offset + subgroup_offset + base;
+
+    sDrawCmd[mesh_id].base_instance = base;
+
+    pass_offset += batch_size;
+  }
+}

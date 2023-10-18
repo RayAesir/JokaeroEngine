@@ -1,0 +1,77 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = THREADS_PER_GROUP) in;
+
+// ubo
+#include "shaders/ubo/frustum_culling.glsl"
+#include "shaders/ubo/lighting.glsl"
+
+// ssbo
+#define STORAGE_POINT_LIGHTS readonly
+#define STORAGE_FRUSTUM_POINT_LIGHTS readonly
+#define STORAGE_PICK_ENTITY writeonly
+#include "shaders/ssbo/frustum_point_lights.glsl"
+#include "shaders/ssbo/pick_entity.glsl"
+#include "shaders/ssbo/point_lights.glsl"
+
+// shared
+shared uint sClosestToLight;
+
+bool TestRaySphere(vec3 sphere_center, float sphere_radius2) {
+  vec3 co = sphere_center - uRayOrigin.xyz;
+  float b = dot(co, uRayDir.xyz);
+  float c = dot(co, co) - sphere_radius2;
+  float discriminant = b * b - c;
+  return (discriminant >= 0.0) ? true : false;
+}
+
+// stream compaction (lights+shadows) is faster than bitonic sorting ~2x
+void main() {
+  uint tid = gl_LocalInvocationIndex;
+  if (tid == 0) {
+    sClosestToLight = 0;
+    sPointLightBufferId = 0;
+    sPointLightId = 0;
+  }
+  memoryBarrierShared();
+  barrier();
+
+  // frustum lights offset to test spheres
+  uint frustum_offset = 0;
+  while (frustum_offset < uPointLightsTotal) {
+    uint frustum_id = frustum_offset + tid;
+
+    // e.g. 700 lights, two iterations, batch_size = [512, 188]
+    uint batch_size =
+        min(THREADS_PER_GROUP, uPointLightsTotal - frustum_offset);
+    if (tid < batch_size) {
+      uint light_index = sFrustumPointLights[frustum_id];
+      PointLight light = sPointLights[light_index];
+      // look at light
+      if (TestRaySphere(light.position.xyz, light.radius2)) {
+        vec3 dir_to_light = normalize(light.position.xyz - uRayOrigin.xyz);
+        float LdotR = dot(dir_to_light, uRayDir.xyz);
+        // cos range is [-1, 1], drop lights behind camera
+        if (LdotR > 0.0) {
+          // the bigger LdotR, the closer crosshair to light's center
+          uint as_uint = uint(LdotR * 1e3);
+          atomicMax(sClosestToLight, as_uint);
+          if (as_uint >= sClosestToLight) {
+            sPointLightBufferId = light_index;
+            sPointLightId = sPointLights[light_index].id;
+          }
+        }
+      }
+    }
+
+    frustum_offset += batch_size;
+  }
+}

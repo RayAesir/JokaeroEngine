@@ -1,0 +1,101 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = WARP_SIZE) in;
+
+// ubo
+#include "shaders/ubo/frustum_culling.glsl"
+#include "shaders/ubo/lighting.glsl"
+
+// ssbo
+#define STORAGE_ATOMIC_COUNTERS
+#define STORAGE_INSTANCES readonly
+#define STORAGE_MATRICES readonly
+#define STORAGE_BOXES readonly
+#define STORAGE_FRUSTUM_POINT_SHADOWS readonly
+#define INDIRECT_CMD_DRAW writeonly
+#define STORAGE_VISIBILITY writeonly
+#include "shaders/ssbo/atomic_counters.glsl"
+#include "shaders/ssbo/boxes.glsl"
+#include "shaders/ssbo/frustum_point_shadows.glsl"
+#include "shaders/ssbo/indirect_cmd_draw.glsl"
+#include "shaders/ssbo/instances.glsl"
+#include "shaders/ssbo/matrices.glsl"
+#include "shaders/ssbo/visibility.glsl"
+
+bool TestPlaneAabb(Aabb box, vec4 plane) {
+  float radius = dot(box.extent.xyz, abs(plane.xyz));
+  float dist = dot(plane.xyz, box.center.xyz) - plane.w;
+  if (abs(dist) <= radius) return true;
+  return dist > radius ? true : false;
+}
+
+bool TestAabbInFrustum(Aabb box, uint layer_index) {
+  vec4[FRUSTUM_PLANES] cubemap_frustum =
+      sFrustumPointShadowsLayerFrustum[layer_index];
+  for (int p = 0; p < FRUSTUM_PLANES; ++p) {
+    vec4 plane = cubemap_frustum[p];
+    if (TestPlaneAabb(box, plane) == false) return false;
+  }
+  return true;
+}
+
+void main() {
+  uint tid = gl_GlobalInvocationID.x;
+  uint shadow_count = 0;
+  uint shadow_indices[MAX_POINT_SHADOWS_PER_INSTANCE];
+
+  if (tid < uSceneInstanceCount) {
+    Instance instance = sInstances[tid];
+    if ((instance.props & ENABLED) > 0) {
+      uint cmd_index = UnpackCmdIndex(instance.packed_cmd_index);
+      Aabb box;
+      if (instance.animation_index == 0) {
+        box = sStaticBoxes[instance.box_index];
+      } else {
+        box = sSkinnedBoxes[instance.box_index];
+      }
+
+      mat4 transformation = sWorld[instance.matrix_index];
+      mat3 abs_mat = mat3(transformation);
+      abs_mat[0] = abs(abs_mat[0]);
+      abs_mat[1] = abs(abs_mat[1]);
+      abs_mat[2] = abs(abs_mat[2]);
+      box.center = transformation * box.center;
+      box.extent = vec4(abs_mat * box.extent.xyz, 0.0);
+
+      // one instance is tested across all lights,
+      // each light consists of 6 frustums (cubemap faces)
+      for (uint shadow_id = 0; shadow_id < uPointShadowsTotal; ++shadow_id) {
+        for (uint face = 0; face < FRUSTUM_PLANES; ++face) {
+          uint layer_index = shadow_id * CUBEMAP_FACES + face;
+          if (TestAabbInFrustum(box, layer_index)) {
+            if (shadow_count < MAX_POINT_SHADOWS_PER_INSTANCE) {
+              atomicAdd(sDrawCmd[cmd_index].instance_count, 1);
+              shadow_indices[shadow_count] = layer_index;
+              shadow_count++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  barrier();
+
+  uint offset = atomicAdd(sFrustumInstancesPointShadowsCount, shadow_count);
+
+  sPointShadowsCountOffset[tid].x = shadow_count;
+  sPointShadowsCountOffset[tid].y = offset;
+
+  for (uint i = 0; i < shadow_count; ++i) {
+    sInstanceVisibility[offset + i] = shadow_indices[i];
+  }
+}

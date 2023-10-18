@@ -1,0 +1,116 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+layout(local_size_x = CLUSTER_THREADS_X, local_size_y = CLUSTER_THREADS_Y,
+       local_size_z = CLUSTER_THREADS_Z) in;
+
+// ubo
+#include "shaders/ubo/camera.glsl"
+#include "shaders/ubo/lighting.glsl"
+
+// ssbo
+#define STORAGE_ATOMIC_COUNTERS
+#define STORAGE_POINT_LIGHTS readonly
+#define STORAGE_FRUSTUM_POINT_LIGHTS readonly
+#define STORAGE_FRUSTUM_CLUSTERS readonly
+#define STORAGE_CLUSTER_LIGHTS writeonly
+#include "shaders/ssbo/atomic_counters.glsl"
+#include "shaders/ssbo/cluster_lights.glsl"
+#include "shaders/ssbo/frustum_clusters.glsl"
+#include "shaders/ssbo/frustum_point_lights.glsl"
+#include "shaders/ssbo/point_lights.glsl"
+
+// constants
+#define THREAD_COUNT (CLUSTER_THREADS_X * CLUSTER_THREADS_Y * CLUSTER_THREADS_Z)
+
+// shared
+// GL_MAX_COMPUTE_SHARED_MEMORY_SIZE is 48KB
+// 576 * 20 bytes = 11,5KB
+shared vec4 sLightViewPosRad2[THREAD_COUNT];
+shared uint sLightSceneIndex[THREAD_COUNT];
+
+bool TestPointLightCluster(uint light_index, uint cluster_index) {
+  vec3 center = sLightViewPosRad2[light_index].xyz;
+  float radius2 = sLightViewPosRad2[light_index].w;
+  ClusterAABB box = sClusterBox[cluster_index];
+
+  // get closest point to sphere center
+  vec3 closest = max(box.min_point.xyz, min(center, box.max_point.xyz));
+  // check if point is inside the sphere
+  vec3 dist = closest - center;
+
+  return dot(dist, dist) <= radius2;
+}
+
+// https://www.humus.name/Articles/PracticalClusteredShading.pdf
+// http://www.aortiz.me/2018/12/21/CG.html
+// http://advances.realtimerendering.com/s2016/Siggraph2016_idTech6.pdf
+// https://ubm-twvideo01.s3.amazonaws.com/o1/vault/gdc2018/presentations/Marchalot_Ronan_ClusteredRenderingAnd.pdf
+// https://www.3dgep.com/wp-content/uploads/2017/07/3910539_Jeremiah_van_Oosten_Volume_Tiled_Forward_Shading.pdf
+
+void main() {
+  // gl_GlobalInvocationIndex
+  uint cluster_index =
+      gl_GlobalInvocationID.z * gl_WorkGroupSize.x * gl_WorkGroupSize.y +  //
+      gl_GlobalInvocationID.y * gl_WorkGroupSize.x +                       //
+      gl_GlobalInvocationID.x;                                             //
+
+  uint visible_count = 0;
+  uint visible_indices[MAX_POINT_LIGHTS_PER_CLUSTER];
+
+  uint pass_offset = 0;
+  while (pass_offset < uPointLightsTotal) {
+    uint batch_size = min(THREAD_COUNT, uPointLightsTotal - pass_offset);
+
+    if (gl_LocalInvocationIndex < batch_size) {
+      uint frustum_light_index = pass_offset + gl_LocalInvocationIndex;
+
+      // populating shared variables
+      uint scene_light_index = sFrustumPointLights[frustum_light_index];
+      PointLight light = sPointLights[scene_light_index];
+      vec3 light_pos = vec3(uView * light.position);
+      sLightViewPosRad2[gl_LocalInvocationIndex] =
+          vec4(light_pos, light.radius2);
+      sLightSceneIndex[gl_LocalInvocationIndex] = scene_light_index;
+    }
+
+    // wait for all threads to finish copying
+    memoryBarrierShared();
+    barrier();
+
+    // each thread is one cluster and checks all lights
+    for (uint shared_index = 0; shared_index < batch_size; ++shared_index) {
+      // prevent overflow
+      if (visible_count < MAX_POINT_LIGHTS_PER_CLUSTER) {
+        if (TestPointLightCluster(shared_index, cluster_index)) {
+          uint frustum_light_index = pass_offset + shared_index;
+          visible_indices[visible_count] =
+              sLightSceneIndex[frustum_light_index];
+          visible_count++;
+        }
+      }
+    }
+
+    pass_offset += batch_size;
+  }
+
+  // we want all thread groups to have completed
+  // the light tests before continuing
+  barrier();
+
+  // return previous value
+  uint offset = atomicAdd(sClusterPointLightsCount, visible_count);
+
+  sPointLightsCountOffset[cluster_index].x = visible_count;
+  sPointLightsCountOffset[cluster_index].y = offset;
+
+  for (uint i = 0; i < visible_count; ++i) {
+    sPointLightsIndices[offset + i] = visible_indices[i];
+  }
+}

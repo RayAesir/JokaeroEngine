@@ -1,0 +1,48 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// https://www.khronos.org/blog/vulkan-subgroup-tutorial
+// https://www.khronos.org/assets/uploads/developers/library/2018-vulkan-devday/06-subgroups.pdf
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = WARP_SIZE) in;
+
+// ubo
+#include "shaders/ubo/frustum_culling.glsl"
+
+// ssbo
+#define INDIRECT_CMD_DRAW writeonly
+#define STORAGE_ATOMIC_COUNTERS
+#define STORAGE_INSTANCES readonly
+#define STORAGE_VISIBILITY readonly
+#include "shaders/ssbo/atomic_counters.glsl"
+#include "shaders/ssbo/indirect_cmd_draw.glsl"
+#include "shaders/ssbo/instances.glsl"
+#include "shaders/ssbo/visibility.glsl"
+
+void main() {
+  uint tid = gl_GlobalInvocationID.x;
+  uint visibility = sInstanceVisibility[tid];
+
+  if (tid < uSceneInstanceCount) {
+    if (visibility == 1) {
+      Instance instance = sInstances[tid];
+      uint cmd_index = UnpackCmdIndex(instance.packed_cmd_index);
+      atomicAdd(sDrawCmd[cmd_index].instance_count, 1);
+    }
+  }
+  barrier();
+
+  // subgroup count
+  visibility = subgroupAdd(visibility);
+  if (subgroupElect()) {
+    atomicAdd(sOcclusionInstancesViewCount, visibility);
+  }
+}

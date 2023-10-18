@@ -1,0 +1,105 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "jokaero-engine",
+  "version-string": "0.9.9",
+  "license": "MIT",
+  "dependencies": [
+    "assimp",
+    "fmt",
+    "fruit",
+    {
+      "name": "glad",
+      "features": ["extensions"]
+    },
+    "glfw3",
+    "glm",
+    {
+      "name": "imgui",
+      "features": ["glfw-binding", "opengl3-binding"]
+    },
+    "imguizmo",
+    "indicators",
+    "magic-enum",
+    {
+      "name": "mimalloc",
+      "features": ["override"]
+    },
+    "opengl",
+    "palsigslot",
+    "simpleini",
+    "spdlog",
+    "stb",
+    "taskflow"
+  ],
+  "overrides": [
+    {
+      "name": "assimp",
+      "version": "5.3.1#2"
+    },
+    {
+      "name": "fmt",
+      "version": "10.1.1"
+    },
+    {
+      "name": "fruit",
+      "version": "3.7.1"
+    },
+    {
+      "name": "glad",
+      "version": "0.1.36"
+    },
+    {
+      "name": "glfw3",
+      "version": "3.3.8#2"
+    },
+    {
+      "name": "glm",
+      "version": "2023-06-08"
+    },
+    {
+      "name": "imgui",
+      "version": "1.89.9"
+    },
+    {
+      "name": "imguizmo",
+      "version": "1.83#1"
+    },
+    {
+      "name": "indicators",
+      "version": "2.3"
+    },
+    {
+      "name": "magic-enum",
+      "version": "0.9.3"
+    },
+    {
+      "name": "mimalloc",
+      "version": "2.1.1"
+    },
+    {
+      "name": "opengl",
+      "version": "2022-12-04#3"
+    },
+    {
+      "name": "palsigslot",
+      "version": "1.2.2"
+    },
+    {
+      "name": "simpleini",
+      "version": "4.19"
+    },
+    {
+      "name": "spdlog",
+      "version": "1.12.0"
+    },
+    {
+      "name": "stb",
+      "version": "2023-04-11#1"
+    },
+    {
+      "name": "taskflow",
+      "version": "3.6.0"
+    }
+  ],
+  "builtin-baseline": "621b7abe07d61f565795d15fb829caf8dcde0c18"
+}

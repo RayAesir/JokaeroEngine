@@ -1,0 +1,30 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = WARP_SIZE) in;
+
+// ubo
+#include "shaders/ubo/frustum_culling.glsl"
+
+// ssbo
+#define INDIRECT_CMD_STORAGE readonly
+#define INDIRECT_CMD_DRAW writeonly
+#include "shaders/ssbo/indirect_cmd_draw.glsl"
+#include "shaders/ssbo/indirect_cmd_storage.glsl"
+
+void main() {
+  uint tid = gl_GlobalInvocationID.x;
+  if (tid < uSceneMeshCount) {
+    uint cmd_index = UnpackCmdIndex(sStorageCmd[tid].packed_cmd_index);
+    sDrawCmd[cmd_index].count = sStorageCmd[tid].count;
+    sDrawCmd[cmd_index].first_index = sStorageCmd[tid].first_index;
+    sDrawCmd[cmd_index].base_vertex = sStorageCmd[tid].base_vertex;
+  }
+}

@@ -1,0 +1,128 @@
+#version 460 core
+
+#ifdef GL_GOOGLE_include_directive
+#extension GL_GOOGLE_include_directive : enable
+#endif
+
+// https://www.khronos.org/blog/vulkan-subgroup-tutorial
+// https://www.khronos.org/assets/uploads/developers/library/2018-vulkan-devday/06-subgroups.pdf
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+// header
+#include "shaders/header.glsl"
+
+// compute
+layout(local_size_x = WARP_SIZE) in;
+
+// ubo
+#include "shaders/ubo/frustum_culling.glsl"
+#include "shaders/ubo/shadows.glsl"
+
+// ssbo
+#define STORAGE_ATOMIC_COUNTERS
+#define STORAGE_INSTANCES readonly
+#define STORAGE_MATRICES readonly
+#define STORAGE_BOXES readonly
+#define INDIRECT_CMD_DRAW writeonly
+#define STORAGE_VISIBILITY writeonly
+#include "shaders/ssbo/atomic_counters.glsl"
+#include "shaders/ssbo/boxes.glsl"
+#include "shaders/ssbo/indirect_cmd_draw.glsl"
+#include "shaders/ssbo/instances.glsl"
+#include "shaders/ssbo/matrices.glsl"
+#include "shaders/ssbo/visibility.glsl"
+
+// constants
+uint kBitShift[MAX_CASCADES] = uint[]((1 << 0),  //
+                                      (1 << 1),  //
+                                      (1 << 2),  //
+                                      (1 << 3)   //
+);
+
+struct Obb {
+  mat3 orientation;
+  vec3 center;
+  vec3 extent;
+};
+
+vec3 GetScale(mat4 t) {
+  float scale_x = length(vec3(t[0]));
+  float scale_y = length(vec3(t[1]));
+  float scale_z = length(vec3(t[2]));
+  return vec3(scale_x, scale_y, scale_z);
+}
+
+mat3 GetRotation(mat4 t, vec3 scale) {
+  mat3 rotation = mat3(t);
+  rotation[0] /= scale.x;
+  rotation[1] /= scale.y;
+  rotation[2] /= scale.z;
+  return rotation;
+}
+
+Obb GetObbFromAabb(Aabb box, mat4 t) {
+  vec3 scale = GetScale(t);
+  mat3 rotation = GetRotation(t, scale);
+  Obb obb;
+  obb.orientation = rotation;
+  obb.center = vec3(t * box.center);
+  obb.extent = scale * box.extent.xyz;
+  return obb;
+}
+
+bool TestPlaneObb(Obb obb, vec4 plane) {
+  vec3 plane_normal = plane.xyz;
+  float plane_dist = plane.w;
+  vec3 proj_normal = transpose(obb.orientation) * plane_normal;
+  float radius = dot(obb.extent, abs(proj_normal));
+  float dist = dot(plane_normal, obb.center) - plane_dist;
+  if (abs(dist) <= radius) return true;
+  return dist > radius ? true : false;
+}
+
+bool TestObbInDop(Obb obb, uint cascade) {
+  for (uint p = 0; p < uCascadesDopTotal[cascade]; ++p) {
+    vec4 plane = uCascadesDopPlanes[(cascade * DOP_PLANES) + p];
+    if (TestPlaneObb(obb, plane) == false) return false;
+  }
+  return true;
+}
+
+void main() {
+  uint tid = gl_GlobalInvocationID.x;
+  uint visibility = 0;
+  uint count = 0;
+
+  if (tid < uSceneInstanceCount) {
+    Instance instance = sInstances[tid];
+    if ((instance.props & ENABLED) > 0) {
+      mat4 transformation = sWorld[instance.matrix_index];
+      Aabb box;
+      if (instance.animation_index == 0) {
+        box = sStaticBoxes[instance.box_index];
+      } else {
+        box = sSkinnedBoxes[instance.box_index];
+      }
+      Obb obb = GetObbFromAabb(box, transformation);
+
+      for (uint cascade = 0; cascade < uNumCascades; ++cascade) {
+        if (TestObbInDop(obb, cascade)) {
+          // pass cascade's index as bit
+          visibility |= kBitShift[cascade];
+          uint cmd_index = UnpackCmdIndex(instance.packed_cmd_index);
+          atomicAdd(sDrawCmd[cmd_index].instance_count, 1);
+          count += 1;
+        }
+      }
+    }
+  }
+
+  sInstanceVisibility[tid] = visibility;
+  barrier();
+
+  // subgroup count
+  count = subgroupAdd(count);
+  if (subgroupElect()) {
+    atomicAdd(sFrustumInstancesDirectShadowsCount, count);
+  }
+}

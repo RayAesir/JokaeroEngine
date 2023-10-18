@@ -1,0 +1,115 @@
+#version 460 core
+
+#define GROUP_SIZE 8
+#define GROUP_THREAD_COUNT (GROUP_SIZE * GROUP_SIZE)
+#define FILTER_SIZE 3
+#define FILTER_RADIUS (FILTER_SIZE / 2)
+#define TILE_SIZE (GROUP_SIZE + 2 * FILTER_RADIUS)
+#define TILE_PIXEL_COUNT (TILE_SIZE * TILE_SIZE)
+
+// compute
+layout(local_size_x = GROUP_SIZE, local_size_y = GROUP_SIZE) in;
+
+// textures
+layout(binding = 0) uniform sampler2D texInput;
+
+// images
+layout(rgba16f, binding = 0) uniform writeonly image2D imgOutput;
+
+// uniform
+// x -> threshold, yzw -> (threshold - knee, 2.0 * knee, 0.25 * knee)
+layout(location = 0) uniform vec4 uThreshold;
+layout(location = 1) uniform vec2 uTexelSize;
+layout(location = 2) uniform int uMipLevel;
+layout(location = 3) uniform bool uUseThreshold;
+
+// shared
+shared float sR[TILE_PIXEL_COUNT];
+shared float sG[TILE_PIXEL_COUNT];
+shared float sB[TILE_PIXEL_COUNT];
+
+vec4 QuadraticThreshold(vec4 color, float threshold, vec3 curve) {
+  // pixel brightness
+  float br = max(color.r, max(color.g, color.b));
+
+  // under-threshold part: quadratic curve
+  float rq = clamp(br - curve.x, 0.0, curve.y);
+  rq = curve.z * rq * rq;
+
+  // combine and apply the brightness response curve.
+  color *= max(rq, br - threshold) / max(br, 1e-5);
+
+  return color;
+}
+
+float Luminance(vec3 c) {
+  return dot(c, vec3(0.2126729, 0.7151522, 0.0721750));
+}
+
+// [Karis2013] proposed reducing the dynamic range before averaging
+vec4 KarisAvg(vec4 c) { return c / (1.0 + Luminance(c.rgb)); }
+
+void StoreLds(int idx, vec4 c) {
+  sR[idx] = c.r;
+  sG[idx] = c.g;
+  sB[idx] = c.b;
+}
+
+vec4 LoadLds(uint idx) { return vec4(sR[idx], sG[idx], sB[idx], 1.0); }
+
+void main() {
+  ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+  ivec2 base_index = ivec2(gl_WorkGroupID.xy) * GROUP_SIZE - FILTER_RADIUS;
+
+  // the first (TILE_PIXEL_COUNT - GROUP_THREAD_COUNT)
+  // threads load at most 2 texel values
+  for (int i = int(gl_LocalInvocationIndex); i < TILE_PIXEL_COUNT;
+       i += GROUP_THREAD_COUNT) {
+    vec2 uv = (vec2(base_index) + vec2(0.5)) * uTexelSize;
+    vec2 uv_offset = vec2(i % TILE_SIZE, i / TILE_SIZE) * uTexelSize;
+
+    vec4 color = textureLod(texInput, uv + uv_offset, uMipLevel);
+    StoreLds(i, color);
+  }
+
+  memoryBarrierShared();
+  barrier();
+
+  // based on [Jimenez14] http://goo.gl/eomGso
+  // center texel
+  uint sm_idx = (gl_LocalInvocationID.x + FILTER_RADIUS) +
+                (gl_LocalInvocationID.y + FILTER_RADIUS) * TILE_SIZE;
+
+  vec4 A = LoadLds(sm_idx - TILE_SIZE - 1);
+  vec4 B = LoadLds(sm_idx - TILE_SIZE);
+  vec4 C = LoadLds(sm_idx - TILE_SIZE + 1);
+  vec4 F = LoadLds(sm_idx - 1);
+  vec4 G = LoadLds(sm_idx);
+  vec4 H = LoadLds(sm_idx + 1);
+  vec4 K = LoadLds(sm_idx + TILE_SIZE - 1);
+  vec4 L = LoadLds(sm_idx + TILE_SIZE);
+  vec4 M = LoadLds(sm_idx + TILE_SIZE + 1);
+
+  vec4 D = (A + B + G + F) * 0.25;
+  vec4 E = (B + C + H + G) * 0.25;
+  vec4 I = (F + G + L + K) * 0.25;
+  vec4 J = (G + H + M + L) * 0.25;
+
+  vec2 div = (1.0 / 4.0) * vec2(0.5, 0.125);
+
+  vec4 c = KarisAvg((D + E + I + J) * div.x);
+  c += KarisAvg((A + B + G + F) * div.y);
+  c += KarisAvg((B + C + H + G) * div.y);
+  c += KarisAvg((F + G + L + K) * div.y);
+  c += KarisAvg((G + H + M + L) * div.y);
+
+  if (uUseThreshold) {
+    c = QuadraticThreshold(c, uThreshold.x, uThreshold.yzw);
+  }
+
+  // fix black dot/pixel artifacts
+  // worldspace spheremap transform of normals
+  c.xyz = max(vec3(1.0e-5), c.xyz);
+
+  imageStore(imgOutput, pixel_coords, c);
+}
