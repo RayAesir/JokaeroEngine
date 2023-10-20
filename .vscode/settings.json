@@ -8,13 +8,11 @@
     "**/.git/objects/**": true,
     "**/.git/subtree-cache/**": true,
     "**/build/**": true,
-    "**/engine/**": true,
-    "**/vcpkg/**": true
+    "**/engine/**": true
   },
   "search.exclude": {
     "**/build": true,
-    "**/engine": true,
-    "**/vcpkg": true
+    "**/engine": true
   },
   "C_Cpp.files.exclude": {
     "**/.vscode": true,

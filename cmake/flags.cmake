@@ -1,6 +1,6 @@
 target_compile_features(${PROJECT_NAME} PRIVATE c_std_17 cxx_std_20)
 
-if(MSVC)
+if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     target_compile_definitions(${PROJECT_NAME} PRIVATE
         _CONSOLE
         _UNICODE
@@ -35,5 +35,22 @@ if(MSVC)
     target_link_options(${PROJECT_NAME} PRIVATE
         "$<$<CONFIG:DEBUG>:/INCREMENTAL;/DEBUG:FASTLINK;/OPT:NOICF;/OPT:NOREF;/LTCG:off;/TIME;/STACK:8388608;>"
         "$<$<CONFIG:RELEASE>:/INCREMENTAL:NO;/LTCG:incremental;/OPT:ICF;/OPT:REF;/TIME;/STACK:8388608;>"
+    )
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        $<$<CONFIG:DEBUG>:DEBUG>
+        $<$<CONFIG:RELEASE>:NDEBUG>
+    )
+    # compiler flags as list
+    set(DEBUG_OPTIONS -Og -g)
+    set(RELEASE_OPTIONS -O3 -s)
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        -Wall
+        -Wno-unknown-pragmas
+        -fPIE
+        $<$<CONFIG:DEBUG>:${DEBUG_OPTIONS}>
+        $<$<CONFIG:RELEASE>:${RELEASE_OPTIONS}>
     )
 endif()

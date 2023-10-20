@@ -1,6 +1,8 @@
 // OS
+#if defined(_WIN32) || defined(_WIN64)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
 // deps
 #include <fruit/fruit.h>
 #include <mimalloc-new-delete.h>
@@ -118,9 +120,11 @@ fruit::Component<Engine> GetEngineComponent() {
 }
 
 int main(int argc, char* argv[]) {
+#if defined(_WIN32) || defined(_WIN64)
   // OS, console codepage UTF-8
   SetConsoleOutputCP(CP_UTF8);
   SetConsoleCP(CP_UTF8);
+#endif
 
   // load Application parameters and Engine options
   ini::Load(opt::set::GetIniDescription(), "engine.ini");

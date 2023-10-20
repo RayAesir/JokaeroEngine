@@ -23,10 +23,18 @@ find_package(OpenGL REQUIRED)
 find_package(PalSigslot CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 
+# gather all output in the local engine folder
+# generator expressions force Visual Studio to use specified path
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY $<0:>${CMAKE_SOURCE_DIR}/engine)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY $<0:>${CMAKE_SOURCE_DIR}/engine)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY $<0:>${CMAKE_SOURCE_DIR}/engine)
+
 # create source group
-set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 include(cmake/sourcelist.cmake)
-source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${SOURCES})
+if (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+    set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+    source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${SOURCES})
+endif()
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 
@@ -53,12 +61,4 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Pal::Sigslot
     spdlog::spdlog
     ${FRUIT_INCLUDE_LIBS}
-)
-
-# copy /build/Debug or /build/Release to /engine folder
-add_custom_command(
-    TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${CMAKE_SOURCE_DIR}/build/$<CONFIGURATION>"
-    "${CMAKE_SOURCE_DIR}/engine/"
 )
