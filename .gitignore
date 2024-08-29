@@ -1,2 +1,2 @@
-build/
-engine/
+/build/*
+/engine/*
