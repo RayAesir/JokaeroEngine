@@ -5,27 +5,35 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Launch",
-      "type": "cppvsdbg", // Windows
-      //   "type": "cppdbg", // Linux
+      "name": "C++ Launch Windows",
+      "type": "cppvsdbg",
       "request": "launch",
       "program": "${workspaceFolder}/engine/JokaeroEngine.exe",
       "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}/engine",
       "environment": [],
-      "externalConsole": true,
-      "linux": {
-        "MIMode": "gdb",
-        "miDebuggerPath": "/usr/bin/gdb",
-        "setupCommands": [
-          {
-            "description": "Enable pretty-printing for gdb",
-            "text": "-enable-pretty-printing",
-            "ignoreFailures": true
-          }
-        ]
-      }
+      "console": "externalTerminal"
+    },
+    {
+      "name": "C++ Launch Linux",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/engine/JokaeroEngine",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}/engine",
+      "environment": [],
+      "externalConsole": true
     }
   ]
 }
