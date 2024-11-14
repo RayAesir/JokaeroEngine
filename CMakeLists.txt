@@ -8,7 +8,10 @@ endif()
 # vcpkg dependencies
 find_path(SIMPLEINI_INCLUDE_DIRS "SimpleIni.h")
 find_path(STB_INCLUDE_DIRS "stb_image.h")
-find_library(FRUIT_INCLUDE_LIBS "fruit.lib")
+find_library(FRUIT_INCLUDE_LIBS
+    NAMES fruit "fruit.lib" "libfruit.a"
+    HINTS "${VCPKG_INSTALLED_DIR}/x64-windows/lib" "${VCPKG_INSTALLED_DIR}/x64-linux/lib"
+)
 find_package(assimp CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(glad CONFIG REQUIRED)
